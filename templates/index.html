@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Skin Cancer Detector</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; margin-top: 20px; background-color: #f4f4f4; }
+        .container { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); display: inline-block; width: 90%; max-width: 600px; }
+        #camera-feed, #image-preview, .result-image { width: 100%; border-radius: 8px; margin-top: 10px; border: 1px solid #ccc; }
+        .button-group { margin-top: 20px; }
+        button { padding: 10px 20px; font-size: 16px; margin: 5px; }
+        #result-container { display: flex; justify-content: space-around; flex-wrap: wrap; margin-top: 20px; }
+        .output-box { border: 1px solid #ccc; padding: 10px; margin: 10px; border-radius: 8px; flex: 1; min-width: 250px; }
+        #result-text { font-size: 1.2em; font-weight: bold; }
+        .comparison-label { font-size: 0.9em; color: #555; margin-top: 5px; }
+
+        /* For mobile view */
+        @media (max-width: 768px) {
+            .container { width: 95%; }
+            .output-box { min-width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Cancer Detector</h1>
+        <p>Use your camera to take a photo of a skin lesion.</p>
+
+        <video id="camera-feed" autoplay playsinline></video>
+        <canvas id="image-canvas" style="display: none;"></canvas>
+        <img id="image-preview" style="display: none;">
+
+        <div class="button-group">
+            <button id="start-camera">Start Camera</button>
+            <button id="take-photo" disabled>Take Photo</button>
+            <button id="upload-photo" disabled>Predict</button>
+        </div>
+
+        <div id="result-container" style="display: none;">
+            <div class="output-box">
+                <h2>Your Image</h2>
+                <img id="user-image" class="result-image">
+            </div>
+            <div class="output-box">
+                <h2>Prediction</h2>
+                <div id="result-text"></div>
+            </div>
+            <div class="output-box">
+                <h2>Comparison</h2>
+                <img id="comparison-image" class="result-image">
+                <div class="comparison-label">Example of a <span id="comparison-label-text"></span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const startCameraButton = document.getElementById('start-camera');
+        const takePhotoButton = document.getElementById('take-photo');
+        const uploadPhotoButton = document.getElementById('upload-photo');
+        const cameraFeed = document.getElementById('camera-feed');
+        const imageCanvas = document.getElementById('image-canvas');
+        const imagePreview = document.getElementById('image-preview');
+        const resultContainer = document.getElementById('result-container');
+        const resultText = document.getElementById('result-text');
+        const userImage = document.getElementById('user-image');
+        const comparisonImage = document.getElementById('comparison-image');
+        const comparisonLabelText = document.getElementById('comparison-label-text');
+
+        let stream;
+
+        startCameraButton.addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: true });
+                cameraFeed.srcObject = stream;
+                cameraFeed.style.display = 'block';
+                imagePreview.style.display = 'none';
+                takePhotoButton.disabled = false;
+                startCameraButton.disabled = true;
+                uploadPhotoButton.disabled = true;
+                resultContainer.style.display = 'none'; // Hide results when starting camera
+            } catch (err) {
+                console.error("Error accessing the camera: ", err);
+                alert("Could not access the camera. Please ensure you have granted permissions.");
+            }
+        });
+
+        takePhotoButton.addEventListener('click', () => {
+            const context = imageCanvas.getContext('2d');
+            imageCanvas.width = cameraFeed.videoWidth;
+            imageCanvas.height = cameraFeed.videoHeight;
+            context.drawImage(cameraFeed, 0, 0, imageCanvas.width, imageCanvas.height);
+
+            imagePreview.src = imageCanvas.toDataURL('image/jpeg');
+            imagePreview.style.display = 'block';
+            cameraFeed.style.display = 'none';
+            uploadPhotoButton.disabled = false;
+            takePhotoButton.disabled = true;
+        });
+
+        uploadPhotoButton.addEventListener('click', async () => {
+            resultText.innerHTML = "Predicting...";
+            const dataUrl = imageCanvas.toDataURL('image/jpeg');
+            const blob = await (await fetch(dataUrl)).blob();
+            const formData = new FormData();
+            formData.append('file', blob, 'photo.jpeg');
+
+            userImage.src = dataUrl;
+            resultContainer.style.display = 'flex';
+
+            const response = await fetch('/predict', {
+                method: 'POST',
+                body: formData
+            });
+
+            const result = await response.json();
+
+            if (response.ok) {
+                resultText.innerHTML = `Prediction: ${result.prediction}<br>Confidence: ${result.confidence}%`;
+                comparisonLabelText.textContent = result.prediction;
+                comparisonImage.src = `/static/comparison_images/${result.comparison_image}`;
+            } else {
+                resultText.innerHTML = `Error: ${result.error}`;
+            }
+
+            // Stop the camera feed
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                cameraFeed.srcObject = null;
+                startCameraButton.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>
