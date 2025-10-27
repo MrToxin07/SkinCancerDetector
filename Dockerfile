@@ -1,4 +1,4 @@
-# Use a secure and lightweight Python base image that supports TFLite's architecture
+# Use a secure and lightweight Python base image
 FROM python:3.10-slim
 
 # Set environment variables
@@ -9,6 +9,7 @@ ENV PORT 8080
 WORKDIR /app
 
 # Copy requirements and install dependencies
+# This is where the older NumPy will be installed, resolving the conflict.
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
