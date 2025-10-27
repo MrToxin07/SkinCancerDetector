@@ -1,45 +1,63 @@
-import tensorflow as tf
-from flask import Flask, request, jsonify, render_template, send_from_directory
-from tensorflow.keras.preprocessing import image
+# -------------------------------------------------------------------------
+# --- TFLite and Flask Imports ---
+# This is the optimal setup for Render's free tier
+# -------------------------------------------------------------------------
+from flask import Flask, request, jsonify, render_template, send_from_directory, make_response
+from tflite_runtime.interpreter import Interpreter
+from PIL import Image # Pillow is used for image loading/processing
 import numpy as np
 import io
 import os
+import sys
 
-# --- Configuration ---
+# -------------------------------------------------------------------------
+# --- 1. PATH CONFIGURATION (Correct for Docker/Render) ---
+# -------------------------------------------------------------------------
+# NOTE: In Docker, the current working directory (os.getcwd()) is set to /app.
+# We define paths relative to /app.
+PROJECT_DIR = os.getcwd() 
+TFLITE_MODEL_PATH = os.path.join(PROJECT_DIR, 'models', 'skin_cancer_detector.tflite')
+
+# --- Other Configuration ---
 IMG_WIDTH, IMG_HEIGHT = 100, 75
-MODEL_PATH = 'models/skin_cancer_detector.h5'
-COMPARISON_IMAGES_FOLDER = 'static/comparison_images'
 
-# --- Load the Trained Model ---
-try:
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print("Model loaded successfully.")
-except Exception as e:
-    print(f"Error loading model: {e}")
-    print("Please make sure you have run train_model.py first to train and save the model.")
-    exit()
-
-# Get the class labels from the training script and map them to filenames
+# Get the class labels and map them for prediction output
 class_labels = {
-    'Melanocytic nevi': 'Melanocytic_nevi',
-    'Melanoma': 'Melanoma',
+    'Melanocytic nevi': 'Melanocytic_nevi', 'Melanoma': 'Melanoma',
     'Benign keratosis-like lesions': 'Benign_keratosis-like_lesions',
     'Basal cell carcinoma': 'Basal_cell_carcinoma',
     'Actinic keratoses and intraepithelial carcinomae': 'Actinic_keratoses_and_intraepithelial_carcinomae',
-    'Vascular lesions': 'Vascular_lesions',
-    'Dermatofibroma': 'Dermatofibroma'
+    'Vascular lesions': 'Vascular_lesions', 'Dermatofibroma': 'Dermatofibroma'
 }
-sorted_labels = sorted(list(class_labels.keys()))
+# The model's index output matches the sorted order of these keys
+sorted_labels = sorted(list(class_labels.keys())) 
 
-# Initialize the Flask application
+# -------------------------------------------------------------------------
+# --- 2. LOAD TFLite MODEL (Initialization) ---
+# -------------------------------------------------------------------------
+try:
+    # 1. Initialize the TFLite Interpreter
+    interpreter = Interpreter(model_path=TFLITE_MODEL_PATH)
+    interpreter.allocate_tensors()
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    print("TFLite model loaded successfully.")
+except Exception as e:
+    # If the model fails to load, the web app will crash (Render will show an error)
+    print(f"FATAL ERROR: Could not load TFLite model at {TFLITE_MODEL_PATH}")
+    print(f"Details: {e}")
+    # Render requires the process to exit immediately if startup fails
+    sys.exit(f"Application startup failed: {e}") 
+
+# -------------------------------------------------------------------------
+# --- 3. FLASK APPLICATION ROUTES ---
+# -------------------------------------------------------------------------
 app = Flask(__name__)
 
-# --- Web Page Route ---
 @app.route('/')
 def home():
     return render_template('index.html')
 
-# --- API Endpoint ---
 @app.route('/predict', methods=['POST'])
 def predict():
     if 'file' not in request.files:
@@ -51,38 +69,59 @@ def predict():
 
     if file:
         try:
-            # Read the image file from the request
-            img_data = file.read()
-            img = image.load_img(io.BytesIO(img_data), target_size=(IMG_WIDTH, IMG_HEIGHT))
-            img_array = image.img_to_array(img)
-            img_array = np.expand_dims(img_array, axis=0)
-            img_array /= 255.0
+            # 1. Read and Process Image using PIL
+            img = Image.open(io.BytesIO(file.read()))
+            img_resized = img.resize((IMG_WIDTH, IMG_HEIGHT))
+            
+            # 2. Convert to NumPy array and normalize
+            input_data = np.asarray(img_resized, dtype=np.float32)
+            input_data = np.expand_dims(input_data, axis=0)
+            input_data /= 255.0  # Normalize to 0-1 range
 
-            # Make the prediction
-            predictions = model.predict(img_array)
-            score = tf.nn.softmax(predictions[0])
-            predicted_class_index = np.argmax(score)
+            # 3. Run TFLite Inference
+            interpreter.set_tensor(input_details[0]['index'], input_data)
+            interpreter.invoke()
+            output = interpreter.get_tensor(output_details[0]['index'])
 
+            # 4. Get Scores and Confidence (Softmax in NumPy)
+            # This is the pure NumPy replacement for tf.nn.softmax
+            exp_scores = np.exp(output[0])
+            scores = exp_scores / np.sum(exp_scores)
+            
+            predicted_class_index = np.argmax(scores)
             predicted_class_name = sorted_labels[predicted_class_index]
-            predicted_class_filename = class_labels[predicted_class_name] + '.jpg'
+            confidence = float(np.max(scores) * 100)
+            
+            # Map the class name to the physical image file name
+            predicted_filename = class_labels[predicted_class_name] + '.jpg'
 
-            confidence = float(np.max(score) * 100)
-
-            response = {
+            response_data = {
                 "prediction": predicted_class_name,
                 "confidence": round(confidence, 2),
-                "comparison_image": predicted_class_filename
+                "comparison_image": predicted_filename
             }
-            return jsonify(response)
+            
+            # Add headers to prevent browser caching
+            response = make_response(jsonify(response_data))
+            response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+
+            return response
 
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
+            # Catch internal errors during prediction and return a helpful JSON response
+            return jsonify({'error': f"Prediction failed due to: {str(e)}"}), 500
 
 # --- Static file serving route for comparison images ---
+# This serves files from the 'static/comparison_images' folder, which Docker copied to /app/static/comparison_images
 @app.route('/static/comparison_images/<filename>')
 def serve_comparison_image(filename):
-    return send_from_directory(os.path.join(os.getcwd(), 'static', 'comparison_images'), filename)
+    # Render's default static file serving will handle this, but for completeness, 
+    # we point to the directory inside the container.
+    static_folder_path = os.path.join(PROJECT_DIR, 'static', 'comparison_images')
+    return send_from_directory(static_folder_path, filename)
 
-if __name__ == '__main__':
-    # This host setting allows anyone on your local network to access the app
-    app.run(debug=True, host='0.0.0.0')
+# Render requires the app to listen on the $PORT environment variable, which defaults to 8080.
+# The CMD line in the Dockerfile handles starting gunicorn on 0.0.0.0:8080.
+# We do not include app.run() here.
