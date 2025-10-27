@@ -1,5 +1,7 @@
 Flask
 Pillow
-tflite-runtime
 gunicorn
-numpy<2
+# Force TFLite to a version that supports new opcodes (2.15 is safer)
+tflite-runtime>=2.15.0
+# Lock NumPy below version 2 to prevent the secondary crash
+numpy<2.0
