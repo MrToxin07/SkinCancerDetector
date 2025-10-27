@@ -1,4 +1,5 @@
 Flask
 Pillow
 tflite-runtime
-gunicorn  # Render uses gunicorn to run Python apps
+gunicorn
+numpy<2
